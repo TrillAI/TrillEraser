@@ -618,6 +618,18 @@ async function detectAt(x,y){if(S.busy||!S.hasImage)return;const rip=$('#ripple'
 
 async function inpaint(onp){
 
+  /* ---- WebView security note (android/skills security) ----
+
+     This WebView loads only local assets (file:///android_asset/index.html).
+
+     JavaScript and file access are enabled solely so the bundled editor can
+
+     read canvas pixel data and save results locally. No network permission is
+
+     declared, no remote URLs are loaded, and no user content is uploaded.
+
+     --------------------------------------------------------------------- */
+
   const W=S.W,H=S.H,n=W*H;ensureMaskArray();
 
   const id=ictx.getImageData(0,0,W,H),d=id.data;
@@ -670,13 +682,37 @@ async function inpaint(onp){
 
   let Rb=Float32Array.from(Ra),Gb=Float32Array.from(Ga),Bb=Float32Array.from(Ba);
 
+  /* ---- ANR prevention (android/skills performance/anr-audit-and-fix) ----
+
+     WebView JavaScript runs on the main thread. Yield control back to the
+
+     browser based on elapsed time (not just iteration count) so the UI stays
+
+     responsive and we avoid Application Not Responding on large masks.
+
+     ---------------------------------------------------------------- */
+
+  let lastYield=performance.now();
+
+  const YIELD_MS=30;
+
+  async function maybeYield(){
+
+    const now=performance.now();
+
+    if(now-lastYield>=YIELD_MS){lastYield=now;await raf();return true;}
+
+    return false;
+
+  }
+
   for(let it=0;it<48;it++){
 
     for(let k=0;k<holes;k++){const i=hl[k],x=i%W,y=(i/W)|0;const xl=x?i-1:i,xr=x<W-1?i+1:i,yu=y?i-W:i,yd=y<H-1?i+W:i;Rb[i]=(Ra[xl]+Ra[xr]+Ra[yu]+Ra[yd])*.25;Gb[i]=(Ga[xl]+Ga[xr]+Ga[yu]+Ga[yd])*.25;Bb[i]=(Ba[xl]+Ba[xr]+Ba[yu]+Ba[yd])*.25;}
 
     let t=Ra;Ra=Rb;Rb=t;t=Ga;Ga=Gb;Gb=t;t=Ba;Ba=Bb;Bb=t;
 
-    if((it&7)===7){onp(.18+.5*it/48);await raf();}
+    if((it&7)===7||await maybeYield()){onp(.18+.5*it/48);await raf();lastYield=performance.now();}
 
   }
 
@@ -686,51 +722,80 @@ async function inpaint(onp){
 
     let t=Ra;Ra=Rb;Rb=t;t=Ga;Ga=Gb;Gb=t;t=Ba;Ba=Bb;Bb=t;
 
-    if(it&1){onp(.7+.15*it/10);await raf();}
+    if(it&1||await maybeYield()){onp(.7+.15*it/10);await raf();lastYield=performance.now();}
 
   }
 
   /* ---------- Edge-aware exemplar texture synthesis ----------
 
-   Ideas ported (offline, client-side) from magic-eraser-studio / PhotoWeaver
-   (MIT-licensed, https://github.com/onlyoneshakibul/magic-eraser-studio):
+     Ideas ported (offline, client-side) from magic-eraser-studio / PhotoWeaver
 
-     * Semantic edge detection: strong (hard) edges are carried across the mask
-       boundary so lines and object contours stay sharp; soft edges (hair,
-       foliage, smoke) are blended with feathering instead of smearing.
-     * Exemplar match: every hole pixel borrows texture from the best-matching
-       known neighbourhood patch, weighted by colour similarity and
-       edge-orientation alignment.
+     (MIT-licensed, https://github.com/onlyoneshakibul/magic-eraser-studio):
 
-   Nothing is uploaded; everything runs inside the WebView. ---------- */
+       * Semantic edge detection: strong (hard) edges are carried across the mask
+
+         boundary so lines and object contours stay sharp; soft edges (hair,
+
+         foliage, smoke) are blended with feathering instead of smearing.
+
+       * Exemplar match: every hole pixel borrows texture from the best-matching
+
+         known neighbourhood patch, weighted by colour similarity and
+
+         edge-orientation alignment.
+
+     Nothing is uploaded; everything runs inside the WebView. ---------- */
 
   // --- Sobel edge map of the ORIGINAL image (computed before we overwrite d) ---
+
   const edge=new Float32Array(n);const edgeOri=new Float32Array(n);
+
   {
+
     const px=(xx,yy)=>{xx=clamp(xx,0,W-1);yy=clamp(yy,0,H-1);const ii=yy*W+xx;return d[ii*4];};
+
     const gx=(x,y)=>-px(x-1,y-1)-2*px(x-1,y)-px(x-1,y+1)
+
                    +px(x+1,y-1)+2*px(x+1,y)+px(x+1,y+1);
+
     const gy=(x,y)=>-px(x-1,y-1)-2*px(x,y-1)-px(x+1,y-1)
+
                    +px(x-1,y+1)+2*px(x,y+1)+px(x+1,y+1);
+
     for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=y*W+x;
+
       const gxv=gx(x,y),gyv=gy(x,y);
+
       edge[i]=Math.hypot(gxv,gyv);
+
       edgeOri[i]=Math.atan2(gyv,gxv);
+
     }
+
   }
 
   // ring of known pixels bordering the mask (colour-correction reference)
+
   const ring=[];const ringSet=new Uint8Array(n);
+
   for(let k=0;k<holes;k++){const i=hl[k],x=i%W,y=(i/W)|0;
+
     for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;if(!S.mask[j]&&!ringSet[j]){ringSet[j]=1;ring.push(j);}}}
+
   let rM=0,gM=0,bM=0,rC=0;
+
   for(let q=0;q<ring.length;q++){const j=ring[q]*4;rM+=d[j];gM+=d[j+1];bM+=d[j+2];rC++;}
+
   if(rC){rM/=rC;gM/=rC;bM/=rC;}
+
   let fR=0,fG=0,fB=0;for(let k=0;k<holes;k++){const i=hl[k];fR+=Ra[i];fG+=Ga[i];fB+=Ba[i];}
+
   fR/=holes;fG/=holes;fB/=holes;
+
   const cR=rC?(rM-fR):0,cG=rC?(gM-fG):0,cB=rC?(bM-fB):0;
 
   const gauss=()=>(Math.random()+Math.random()+Math.random()-1.5);
+
   const patchRad=2,searchRad=10,patchSigma=30,distSigma=8,blend=0.55;
 
   for(let k=0;k<holes;k++){
@@ -786,12 +851,19 @@ async function inpaint(onp){
         if(cnt===0)continue;
 
         // Edge-orientation alignment: preserve hard edges across the boundary.
+
         // Soft edges fall back to pure colour matching (feathered blend).
+
         let align=1;
+
         if(edge[i]>40&&edge[ci]>40){
+
           let dOri=Math.abs(edgeOri[i]-edgeOri[ci]);
+
           if(dOri>Math.PI)dOri=2*Math.PI-dOri;
+
           align=Math.exp(-(dOri*dOri)/(0.9*0.9));
+
         }
 
         const sim=align*Math.exp(-(diff/cnt)/(patchSigma*patchSigma));
@@ -820,6 +892,8 @@ async function inpaint(onp){
 
     d[j]=clamp(Math.round(r+nz),0,255);d[j+1]=clamp(Math.round(g+nz),0,255);d[j+2]=clamp(Math.round(b+nz),0,255);d[j+3]=255;
 
+    if((k&63)===63){await maybeYield();}
+
   }
 
   onp(0.94);await raf();
@@ -827,6 +901,8 @@ async function inpaint(onp){
   ictx.putImageData(id,0,0);onp(1);
 
 }
+
+
 
 function snapshot(){const c=document.createElement('canvas');c.width=S.W;c.height=S.H;c.getContext('2d').drawImage(imgCanvas,0,0);return c;}
 
