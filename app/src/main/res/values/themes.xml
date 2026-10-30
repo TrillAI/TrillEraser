@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.TrillEraser" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#FF544F</item>
+        <item name="colorPrimaryDark">#0B0E14</item>
+        <item name="colorAccent">#35E2C7</item>
+    </style>
+</resources>
